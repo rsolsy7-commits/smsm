@@ -1,154 +1,131 @@
-const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
+const axios = require("axios");
 
-// مسار تخزين القائمة السوداء
-const blacklistPath = path.join(__dirname, "cache", "blacklist.json");
-
+// تفعيل وضع الصوت / النص لكل جروب
 if (!global.ابلين_mode) global.ابلين_mode = {};
+
+// تسجيل الردود
+if (!global.client) global.client = {};
+if (!global.client.handleReply) global.client.handleReply = [];
 
 module.exports.config = {
   name: "ابلين",
   version: "5.0.0",
   credits: "SINKO",
   hasPermssion: 0,
-  description: "ذكاء اصطناعي + تحكم بالمطور",
-  commandCategory: "ai",
-  usages: "[نص]",
+  description: "ذكاء اصطناعي مجاني مطور",
+  commandCategory: "AI",
+  usages: "[نص / اون / اوف]",
   cooldowns: 1
 };
 
-// ================== BLACKLIST ==================
-function getBlacklist() {
-  if (!fs.existsSync(blacklistPath)) fs.writeJsonSync(blacklistPath, []);
-  return fs.readJsonSync(blacklistPath);
+// ===== API مجاني بدون مفتاح =====
+async function askAI(text) {
+  try {
+    const res = await axios.get(
+      `https://api.safone.dev/ai?ask=${encodeURIComponent(text)}`
+    );
+
+    return res.data?.answer || "ما قدرت أرد هسة 😢";
+  } catch (e) {
+    console.error("AI Error:", e.message);
+    return "السيرفر واقع شوية.. جرب لاحقاً 🐱";
+  }
 }
 
-// ================== HANDLE REPLY ==================
-module.exports.handleReply = async function({ api, event, handleReply }) {
-  const { threadID, messageID, senderID, body } = event;
-
-  if (handleReply.author !== senderID) return;
-
-  const isDev = senderID === "61588108307572" || senderID === "100079668997780";
-
-  try {
-    const response = await askGPT(body);
-
-    if ((global.ابلين_mode[threadID] || "text_only") === "voice_only") {
-      return handleVoice(api, event, response);
-    } else {
-      api.sendMessage(response, threadID, (err, info) => {
-        if (!err) {
-          global.client.handleReply.push({
-            name: module.exports.config.name,
-            messageID: info.messageID,
-            author: senderID
-          });
-        }
-      }, messageID);
-    }
-
-  } catch (e) {
-    console.error(e);
-  }
-};
-
-// ================== RUN ==================
-module.exports.run = async function({ api, event, args }) {
+// ===== تشغيل الأمر =====
+module.exports.run = async function ({ api, event, args }) {
   const { threadID, messageID, senderID } = event;
   const query = args.join(" ").trim();
 
-  const developerID = "100081948980908";
-
   // وضع الصوت
   if (query === "اون") {
-    global.ابلين_mode[threadID] = "voice_only";
-    return api.sendMessage("🎤 تم تفعيل وضع الصوت.", threadID, messageID);
+    global.ابلين_mode[threadID] = "voice";
+    return api.sendMessage("🎤 تم تفعيل وضع الصوت", threadID, messageID);
   }
 
+  // وضع النص
   if (query === "اوف") {
-    global.ابلين_mode[threadID] = "text_only";
-    return api.sendMessage("📄 تم تفعيل وضع النص.", threadID, messageID);
+    global.ابلين_mode[threadID] = "text";
+    return api.sendMessage("💬 تم تفعيل وضع النص", threadID, messageID);
   }
 
+  // لو ما كتب شيء
   if (!query) {
-    return api.sendMessage("✍️ اكتب شيء عشان ارد عليك.", threadID, messageID);
+    return api.sendMessage("💬 اكتب سؤال يا زول 😄", threadID, messageID);
   }
 
-  try {
-    const response = await askGPT(query);
+  api.setMessageReaction("🤖", messageID, () => {}, true);
 
-    if ((global.ابلين_mode[threadID] || "text_only") === "voice_only") {
-      return handleVoice(api, event, response);
-    } else {
-      return api.sendMessage(response, threadID, (err, info) => {
-        if (!err) {
-          global.client.handleReply.push({
-            name: module.exports.config.name,
-            messageID: info.messageID,
-            author: senderID
-          });
-        }
-      }, messageID);
+  const reply = await askAI(query);
+
+  // صوت
+  if (global.ابلين_mode[threadID] === "voice") {
+    return sendVoice(api, event, reply);
+  }
+
+  // نص
+  api.sendMessage(reply, threadID, (err, info) => {
+    if (!err) {
+      global.client.handleReply.push({
+        name: this.config.name,
+        messageID: info.messageID,
+        author: senderID
+      });
     }
-
-  } catch (e) {
-    console.error(e);
-    return api.sendMessage("❌ صار خطأ في الاتصال.", threadID, messageID);
-  }
+  }, messageID);
 };
 
-// ================== GPT API ==================
-async function askGPT(query) {
-  try {
-    const res = await axios.post(
-      "https://chatgpt-42.p.rapidapi.com/conversationgpt4-2",
-      {
-        messages: [{ role: "user", content: query }],
-        system_prompt: "انت بوت دردشة ذكي، رد بطريقة لطيفة وبالعربي.",
-        temperature: 0.9,
-        top_k: 5,
-        top_p: 0.9,
-        max_tokens: 256,
-        web_access: false
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "x-rapidapi-host": "chatgpt-42.p.rapidapi.com",
-          "x-rapidapi-key": "a551cb9ce4msh02596fa2c96a8a0p18d329jsnc4e219945e37"
-        }
-      }
-    );
+// ===== الردود المتتابعة =====
+module.exports.handleReply = async function ({ api, event, handleReply }) {
+  const { threadID, messageID, body, senderID } = event;
 
-    return res.data?.result || "⚠️ ما وصل رد.";
-  } catch (e) {
-    console.error("API ERROR:", e.response?.data || e.message);
-    throw e;
+  if (handleReply.author !== senderID) return;
+
+  api.setMessageReaction("💬", messageID, () => {}, true);
+
+  const reply = await askAI(body);
+
+  if (global.ابلين_mode[threadID] === "voice") {
+    return sendVoice(api, event, reply);
   }
-}
 
-// ================== VOICE ==================
-async function handleVoice(api, event, text) {
-  const pathAudio = path.resolve(__dirname, 'cache', `${event.messageID}.mp3`);
+  api.sendMessage(reply, threadID, (err, info) => {
+    if (!err) {
+      global.client.handleReply.push({
+        name: this.config.name,
+        messageID: info.messageID,
+        author: senderID
+      });
+    }
+  }, messageID);
+};
+
+// ===== تحويل النص لصوت =====
+async function sendVoice(api, event, text) {
+  const filePath = path.join(__dirname, "cache", `${event.messageID}.mp3`);
+
   try {
     const { data } = await axios.get(
       `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text)}&tl=ar&client=tw-ob`,
       { responseType: "arraybuffer" }
     );
 
-    fs.ensureDirSync(path.join(__dirname, 'cache'));
-    fs.writeFileSync(pathAudio, Buffer.from(data, "utf-8"));
+    fs.ensureDirSync(path.join(__dirname, "cache"));
+    fs.writeFileSync(filePath, Buffer.from(data));
 
     return api.sendMessage(
-      { attachment: fs.createReadStream(pathAudio) },
+      { attachment: fs.createReadStream(filePath) },
       event.threadID,
-      () => fs.unlinkSync(pathAudio),
+      () => {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      },
       event.messageID
     );
+
   } catch (e) {
-    if (fs.existsSync(pathAudio)) fs.unlinkSync(pathAudio);
+    console.error("Voice Error:", e.message);
     return api.sendMessage(text, event.threadID, event.messageID);
   }
-}
+  }
